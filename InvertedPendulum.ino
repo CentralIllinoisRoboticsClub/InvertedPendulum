@@ -56,6 +56,7 @@ enum cmd_e
   ENC,
   HOME,
   HELP,
+  PRNT_PEND_ENC,
 };
 
 parmDef_t parmDefArray[] =
@@ -79,6 +80,7 @@ parmDef_t parmDefArray[] =
   {"HOME",NULL, HOME},  // Home Cart
   {"?",   NULL, HELP},  // Help
   {"HELP",NULL, HELP},  // Help
+  {"PRNT_PEND_ENC",NULL, PRNT_PEND_ENC}, 
   {NULL,  NULL, 0}      // Sentinel
 };
 
@@ -262,6 +264,9 @@ void loop() {
     case CP:
       moveCarriage();
       break;
+    case PRNT_PEND_ENC:
+	  Serial.println(getPendulumEncoder());
+      break;		
   }
 }
 
