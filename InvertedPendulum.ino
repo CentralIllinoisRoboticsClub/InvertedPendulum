@@ -1,3 +1,5 @@
+#include <math.h>
+
 #define LIMIT_LEFT 12
 #define LIMIT_RIGHT 8
 #define MOTOR_MIN -3000
@@ -19,6 +21,9 @@ volatile int32_t pendulumEnc;
 // Track current motor speed
 int16_t motorSpeed = 0;
 
+// Max motor voltage
+float motorVMax = 12;
+
 // For carriage position control, 2000, 200, 100
 int32_t pkp = 1000;
 int32_t pki = 50;
@@ -33,6 +38,20 @@ int32_t pd = 10;
 int32_t cp = 0;
 int32_t mm = 255;
 int32_t aw = 0;
+
+// LQR gains
+float K_lqr[4] = {-2.9229, -35.0943, -63.1803, -8.4105}; // from voltage input model
+//float K_lqr[4]= {-0.8872, -2.2137, -7.7575, -1.5627}; // from force input model
+
+// Conversion Factors
+const float angle_conv_factor_deg = 0.15;
+const float angle_conv_factor_rad = 0.002618;
+const float cart_conv_factor_m = 0.0001240625;
+
+// Queues for finding derivatives
+const int derivative_que_size = 5;
+float cart_pos_que[derivative_que_size];
+float pend_angle_que[derivative_que_size];
 
 // Enumerations for the various commands
 enum cmd_e
@@ -56,7 +75,8 @@ enum cmd_e
   ENC,
   HOME,
   HELP,
-  PRNT_PEND_ENC,
+  PRNT,
+  STEP,
 };
 
 parmDef_t parmDefArray[] =
@@ -80,7 +100,8 @@ parmDef_t parmDefArray[] =
   {"HOME",NULL, HOME},  // Home Cart
   {"?",   NULL, HELP},  // Help
   {"HELP",NULL, HELP},  // Help
-  {"PRNT_PEND_ENC",NULL, PRNT_PEND_ENC}, 
+  {"PRNT",NULL, PRNT}, 
+  {"STEP",NULL, STEP},
   {NULL,  NULL, 0}      // Sentinel
 };
 
@@ -264,9 +285,25 @@ void loop() {
     case CP:
       moveCarriage();
       break;
-    case PRNT_PEND_ENC:
-	  Serial.println(getPendulumEncoder());
-      break;		
+    case PRNT:
+      //while(1){
+	  //	Serial.println(getPendulumEncoder()*0.15);
+      //}
+      // Motor encoder: 320 PPR
+      // cart travels 0.0397m per revolution                    
+      while(1) { 
+        Serial.println(getMotorEncoder());
+      }
+	case STEP:
+      int startMillis = millis();
+      int currentMillis = startMillis;
+	  motor(40);
+      while(currentMillis - startMillis <= 5000){
+        Serial.println(getMotorEncoder());
+        currentMillis = millis();
+      }
+      motor(0);
+      break;
   }
 }
 
@@ -274,14 +311,17 @@ void balance(void)
 {
   unsigned long startTime = millis();
   unsigned long loopTime = startTime;
-//  int error, dError, d2Error;
-//  static int prevError, prevDError;
-  int32_t error;
-  int32_t intPenError = 0, prevPenError = 0;
-  int16_t m;
   int32_t ptSave = pt;
   int32_t motError;
   int32_t prevMotError = 0;
+  float pendAngle;
+  float prevPendAngle = 0;
+  float pendVel;
+  float cartPos;
+  float prevCartPos = 0;
+  float cartVel;
+  float voltageCmd;
+  float pwmCmd;
 
   // Bring the pendulum encoder into the range 0 - 2400
   while (getPendulumEncoder() < 0) pendulumEnc += 2400;
@@ -290,13 +330,6 @@ void balance(void)
   Serial.println("Balancing");
   Serial.print("Pendulum position = "); Serial.println(getPendulumEncoder());
 
-  
-//  dError= error - prevError;
-//  d2Error= dError - prevDError;
-//  dMotor = (kp * dError) + (ki * error) + (kd * (dError - d2Error));
-//  prevError = error;
-//  prevDError = dError;
-  
   while (1)
   {
     // PID every 10ms
@@ -304,18 +337,23 @@ void balance(void)
     {
       loopTime += lt;
       
-      // Pendulum control loop
-      error = pt - getPendulumEncoder();
+      // Get position and angle measurements, estimate velocities
+      pendAngle = (getPendulumEncoder()-pt)*angle_conv_factor_rad;
+      pendVel = (pendAngle - prevPendAngle)/(lt/1000);
+      cartPos = getMotorEncoder()*cart_conv_factor_m;
+      cartVel = (cartPos - prevCartPos)/(lt/1000);
+
       // Quit if error too large (+/-45 degrees)
-      if ((error > 300) || (error < -300))
+      if ((pendAngle > 0.802851) || (pendAngle < -0.8020851))
       {
         motor(0);
         Serial.println("Pendulum out of bounds");
         break;
       }
-      intPenError += error;
-      m = -(pkp * error / 32) - (lt * pki * intPenError / 128) - (pkd * (error - prevPenError) / 32);
-      prevPenError = error;
+
+      // Calculate voltage cmd then PWM cmd
+      voltageCmd = -(K_lqr[0]*cartPos + K_lqr[1]*cartVel + K_lqr[2]*pendAngle + K_lqr[3]*pendVel);
+      pwmCmd = round(voltageCmd*(255/motorVMax));
 
       motError = getMotorEncoder();
       if ((motError > pd) && (prevMotError <= pd)) pt = ptSave - pa;
@@ -325,9 +363,9 @@ void balance(void)
       prevMotError = motError;
 
       // Clip motor drive
-      if (m > 255) m = 255;
-      else if (m < -255) m = -255;
-      motor(m);
+      if (pwmCmd > 255) pwmCmd = 255;
+      else if (pwmCmd < -255) pwmCmd = -255;
+      motor(pwmCmd);
     }
     // Quit if carriage out of bounds
     if (motorCheck())
@@ -335,6 +373,9 @@ void balance(void)
       Serial.println("Motor out of bounds");
       break;
     }
+    // Set current measurements as previous ones before starting next loop
+    prevCartPos = cartPos;
+    prevPendAngle = pendAngle;
   }
   motor(0);
   // Restore programmed Pendulum Top value
@@ -482,6 +523,10 @@ uint8_t getCmd(void)
   }
   return parmDefArray[parmIdx].cmdEnum;
 }
+
+//inline float estimateDerivative(que[que_size]){
+//	return (que[que_size] - q[0])/(float(que_size)*lt*1000);
+//}
 
 void getCmdSave(char *cmd, int32_t *cmdVal)
 {
