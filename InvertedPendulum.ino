@@ -31,17 +31,18 @@ int32_t pkd = 1000;
 int32_t ckp = 1000;
 int32_t cki = 200;
 int32_t ckd = 100;
-int32_t lt = 5;
+int32_t lt = 5; // sample time in milliseconds
 int32_t pt = 1200;
 int32_t pa = 1;
 int32_t pd = 10;
 int32_t cp = 0;
 int32_t mm = 255;
 int32_t aw = 0;
+float Ts = float(lt)/1000.0; //sample time in seconds
 
 // LQR gains
 //float K_lqr[4] = {-29.0069, -43.3867, -75.8050, -10.0722}; // from voltage input model, Ts = 0.01
-float K_lqr[4] = {-30.2863, -44.4394, -77.6340, -10.3169}; // from voltage input model, Ts = 0.005
+float K_lqr[4] = {-42.4055, -50.3463, -99.0959, -11.9182}; // from voltage input model, Ts = 0.005
 //float K_lqr[4]= {-0.8872, -2.2137, -7.7575, -1.5627}; // from force input model
 
 // Conversion Factors
@@ -55,7 +56,7 @@ const float cart_conv_factor_m = 0.0001240625;
 //float pend_angle_que[derivative_que_size];
 
 // Complementary filter
-float alpha = 1.0;
+float alpha = 0.6;
 
 // Enumerations for the various commands
 enum cmd_e
@@ -70,7 +71,6 @@ enum cmd_e
   CKP,
   CKI,
   CKD,
-  CP,
   LT,
   MM,
   AW,
@@ -94,7 +94,6 @@ parmDef_t parmDefArray[] =
   {"CKP", &ckp, CKP},   // Cart KP
   {"CKI", &cki, CKI},   // Cart KI
   {"CKD", &ckd, CKD},   // Cart KD
-  {"CP",  &cp,  CP},    // Cart Position
   {"LT",  &lt,  LT},    // Loop Time (ms)
   {"MM",  &mm,  MM},    // Motor Max
   {"AW",  &aw,  AW},    // Anti-Windup enable
@@ -286,9 +285,6 @@ void loop() {
     case HOME:
       homeCarriage();
       break;
-    case CP:
-      moveCarriage();
-      break;
     case PRNT:
       //while(1){
 	  //	Serial.println(getPendulumEncoder()*0.15);
@@ -301,7 +297,7 @@ void loop() {
 	case STEP:
       int startMillis = millis();
       int currentMillis = startMillis;
-	  motor(40);
+	    motor(34);
       while(currentMillis - startMillis <= 5000){
         Serial.println(getMotorEncoder());
         currentMillis = millis();
@@ -326,8 +322,9 @@ void balance(void)
   float cartVel;
   float voltageCmd;
   float pwmCmd;
-  float motorEncHome = getMotorEncoder();
+  //float motorEncHome = getMotorEncoder();
   float cartPosRef = 0.0;
+  
   // Bring the pendulum encoder into the range 0 - 2400
   while (getPendulumEncoder() < 0) pendulumEnc += 2400;
   while (getPendulumEncoder() > 2400) pendulumEnc -= 2400;
@@ -337,16 +334,18 @@ void balance(void)
 
   while (1)
   {
-    // PID every 10ms
+    // Control loop every lt milliseconds
     if ((millis() - loopTime) >= lt)
     {
       loopTime += lt;
       
       // Get position and angle measurements, estimate velocities
-      cartPos = (getMotorEncoder()-motorEncHome)*cart_conv_factor_m;
-      cartVel = (cartPos - prevCartPos)/(float(lt)/1000.0);
+      cartPos = (getMotorEncoder())*cart_conv_factor_m;
+      cartPos = alpha*cartPos + (1-alpha)*prevCartPos;
+      cartVel = (cartPos - prevCartPos)/Ts;
       pendAngle = (getPendulumEncoder()-pt)*angle_conv_factor_rad;
-      pendVel = (pendAngle - prevPendAngle)/(float(lt)/1000.0);
+      pendAngle = alpha*pendAngle + (1-alpha)*prevPendAngle;
+      pendVel = (pendAngle - prevPendAngle)/Ts;
       
       Serial.print(cartPos, 4);
       Serial.print(", ");
@@ -367,8 +366,9 @@ void balance(void)
       // Calculate voltage cmd then PWM cmd
       voltageCmd = -(K_lqr[0]*(cartPos - cartPosRef) + K_lqr[1]*cartVel + K_lqr[2]*pendAngle + K_lqr[3]*pendVel);
       pwmCmd = round(voltageCmd*(255/motorVMax));
+      
 
-      motError = getMotorEncoder() - motorEncHome;
+      motError = getMotorEncoder();
       if ((motError > pd) && (prevMotError <= pd)) pt = ptSave - pa;
       else if ((motError < -pd) && (prevMotError >= pd)) pt = ptSave + pa;
       else if ((motError > 0) && (motError < prevMotError)) pt = ptSave;
@@ -378,6 +378,8 @@ void balance(void)
       // Clip motor drive
       if (pwmCmd > 255) pwmCmd = 255;
       else if (pwmCmd < -255) pwmCmd = -255;
+      else if (pwmCmd <= 34 && pwmCmd > 15) pwmCmd = 37;
+      else if (pwmCmd >= -34 && pwmCmd < -15) pwmCmd = -37;
       motor(pwmCmd);
       Serial.print(", ");
       Serial.println(pwmCmd);
@@ -395,64 +397,6 @@ void balance(void)
   motor(0);
   // Restore programmed Pendulum Top value
   pt= ptSave;
-}
-
-void moveCarriage(void)
-{
-  unsigned long startTime = millis();
-  unsigned long loopTime = startTime;
-  int32_t error;
-  int32_t intMotError = 0, prevMotError = 0;
-  int16_t m;
-  
-  Serial.println("Moving carriage");
-  Serial.print("Carriage start position = "); Serial.println(getMotorEncoder());
-  
-  while (1)
-  {
-    // PID every 10ms
-    if ((millis() - loopTime) >= lt)
-    {
-      loopTime += lt;
-      
-      // Motor feedback loop.  Target position is 0.
-      error = cp - getMotorEncoder();
-//      if ((error > 20) || (error < -20)) // Deadband
-      if ((millis() - startTime) < 5000)  // Try for 5 seconds
-      {
-        intMotError += error;
-//        if (aw != 0)
-//        {
-//          if (intMotError > 2000) intMotError = 2000;
-//          else if (intMotError < -2000) intMotError = -2000;
-//        }
-        m = (ckp * error / 2048) + (cki * intMotError / 4096) + (ckd * (error - prevMotError) / 20);
-        if ((aw != 0) && (m > 255) || (m < -255))
-        {
-          intMotError -= error;
-        }
-      }
-      else
-      {
-        motor(0);
-        break;
-      }
-      prevMotError = error;
-
-      // Clip motor drive
-      if (m > 255) m = 255;
-      else if (m < -255) m = -255;
-      motor(m);
-    }
-    // Quit if carriage out of bounds
-    if (motorCheck())
-    {
-      Serial.println("Motor out of bounds");
-      break;
-    }
-  }
-  motor(0);
-  Serial.print("Carriage end position = "); Serial.println(getMotorEncoder());
 }
 
 // Get a command from the serial port.  If the command is a parameter change, then
