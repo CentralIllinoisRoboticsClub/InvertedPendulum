@@ -31,7 +31,7 @@ int32_t pkd = 1000;
 int32_t ckp = 1000;
 int32_t cki = 200;
 int32_t ckd = 100;
-int32_t lt = 10;
+int32_t lt = 5;
 int32_t pt = 1200;
 int32_t pa = 1;
 int32_t pd = 10;
@@ -40,7 +40,8 @@ int32_t mm = 255;
 int32_t aw = 0;
 
 // LQR gains
-float K_lqr[4] = {-2.9229, -35.0943, -63.1803, -8.4105}; // from voltage input model
+//float K_lqr[4] = {-29.0069, -43.3867, -75.8050, -10.0722}; // from voltage input model, Ts = 0.01
+float K_lqr[4] = {-30.2863, -44.4394, -77.6340, -10.3169}; // from voltage input model, Ts = 0.005
 //float K_lqr[4]= {-0.8872, -2.2137, -7.7575, -1.5627}; // from force input model
 
 // Conversion Factors
@@ -49,9 +50,12 @@ const float angle_conv_factor_rad = 0.002618;
 const float cart_conv_factor_m = 0.0001240625;
 
 // Queues for finding derivatives
-const int derivative_que_size = 5;
-float cart_pos_que[derivative_que_size];
-float pend_angle_que[derivative_que_size];
+//const int derivative_que_size = 5;
+//float cart_pos_que[derivative_que_size];
+//float pend_angle_que[derivative_que_size];
+
+// Complementary filter
+float alpha = 1.0;
 
 // Enumerations for the various commands
 enum cmd_e
@@ -322,7 +326,8 @@ void balance(void)
   float cartVel;
   float voltageCmd;
   float pwmCmd;
-
+  float motorEncHome = getMotorEncoder();
+  float cartPosRef = 0.0;
   // Bring the pendulum encoder into the range 0 - 2400
   while (getPendulumEncoder() < 0) pendulumEnc += 2400;
   while (getPendulumEncoder() > 2400) pendulumEnc -= 2400;
@@ -338,10 +343,18 @@ void balance(void)
       loopTime += lt;
       
       // Get position and angle measurements, estimate velocities
+      cartPos = (getMotorEncoder()-motorEncHome)*cart_conv_factor_m;
+      cartVel = (cartPos - prevCartPos)/(float(lt)/1000.0);
       pendAngle = (getPendulumEncoder()-pt)*angle_conv_factor_rad;
-      pendVel = (pendAngle - prevPendAngle)/(lt/1000);
-      cartPos = getMotorEncoder()*cart_conv_factor_m;
-      cartVel = (cartPos - prevCartPos)/(lt/1000);
+      pendVel = (pendAngle - prevPendAngle)/(float(lt)/1000.0);
+      
+      Serial.print(cartPos, 4);
+      Serial.print(", ");
+      Serial.print(cartVel, 4);
+      Serial.print(", ");
+      Serial.print(pendAngle, 4);
+      Serial.print(", ");
+      Serial.print(pendVel, 4);
 
       // Quit if error too large (+/-45 degrees)
       if ((pendAngle > 0.802851) || (pendAngle < -0.8020851))
@@ -352,10 +365,10 @@ void balance(void)
       }
 
       // Calculate voltage cmd then PWM cmd
-      voltageCmd = -(K_lqr[0]*cartPos + K_lqr[1]*cartVel + K_lqr[2]*pendAngle + K_lqr[3]*pendVel);
+      voltageCmd = -(K_lqr[0]*(cartPos - cartPosRef) + K_lqr[1]*cartVel + K_lqr[2]*pendAngle + K_lqr[3]*pendVel);
       pwmCmd = round(voltageCmd*(255/motorVMax));
 
-      motError = getMotorEncoder();
+      motError = getMotorEncoder() - motorEncHome;
       if ((motError > pd) && (prevMotError <= pd)) pt = ptSave - pa;
       else if ((motError < -pd) && (prevMotError >= pd)) pt = ptSave + pa;
       else if ((motError > 0) && (motError < prevMotError)) pt = ptSave;
@@ -366,6 +379,8 @@ void balance(void)
       if (pwmCmd > 255) pwmCmd = 255;
       else if (pwmCmd < -255) pwmCmd = -255;
       motor(pwmCmd);
+      Serial.print(", ");
+      Serial.println(pwmCmd);
     }
     // Quit if carriage out of bounds
     if (motorCheck())
