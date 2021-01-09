@@ -39,21 +39,17 @@ int32_t cp = 0;
 int32_t mm = 255;
 int32_t aw = 0;
 float Ts = float(lt)/1000.0; //sample time in seconds
+//float pendEncDown = getPendulumEncoder();
 
 // LQR gains
-//float K_lqr[4] = {-29.0069, -43.3867, -75.8050, -10.0722}; // from voltage input model, Ts = 0.01
-float K_lqr[4] = {-42.4055, -50.3463, -99.0959, -11.9182}; // from voltage input model, Ts = 0.005
+//float K_lqr[4] = {-29.0069, -43.3867, -75.8050, -10.0722}; // from voltage input model, Ts = 0.010
+float K_lqr[4] = {-54.3826, -55.6237, -113.7970, -13.2103}; // from voltage input model, Ts = 0.005
 //float K_lqr[4]= {-0.8872, -2.2137, -7.7575, -1.5627}; // from force input model
 
 // Conversion Factors
 const float angle_conv_factor_deg = 0.15;
 const float angle_conv_factor_rad = 0.002618;
 const float cart_conv_factor_m = 0.0001240625;
-
-// Queues for finding derivatives
-//const int derivative_que_size = 5;
-//float cart_pos_que[derivative_que_size];
-//float pend_angle_que[derivative_que_size];
 
 // Complementary filter
 float alpha = 0.6;
@@ -103,8 +99,8 @@ parmDef_t parmDefArray[] =
   {"HOME",NULL, HOME},  // Home Cart
   {"?",   NULL, HELP},  // Help
   {"HELP",NULL, HELP},  // Help
-  {"PRNT",NULL, PRNT}, 
-  {"STEP",NULL, STEP},
+  {"PRNT",NULL, PRNT},  // Print motor or pendulum encoder 
+  {"STEP",NULL, STEP},  // Step input to motor speed
   {NULL,  NULL, 0}      // Sentinel
 };
 
@@ -289,8 +285,6 @@ void loop() {
       //while(1){
 	  //	Serial.println(getPendulumEncoder()*0.15);
       //}
-      // Motor encoder: 320 PPR
-      // cart travels 0.0397m per revolution                    
       while(1) { 
         Serial.println(getMotorEncoder());
       }
@@ -314,6 +308,7 @@ void balance(void)
   int32_t ptSave = pt;
   int32_t motError;
   int32_t prevMotError = 0;
+  int32_t error;
   float pendAngle;
   float prevPendAngle = 0;
   float pendVel;
@@ -323,6 +318,7 @@ void balance(void)
   float voltageCmd;
   float pwmCmd;
   //float motorEncHome = getMotorEncoder();
+  //float pendEncDown = getPendulumEncoder();
   float cartPosRef = 0.0;
   
   // Bring the pendulum encoder into the range 0 - 2400
@@ -338,6 +334,15 @@ void balance(void)
     if ((millis() - loopTime) >= lt)
     {
       loopTime += lt;
+
+      // Quit if error too large (+/-45 degrees)
+      error = pt - getPendulumEncoder();
+      if ((error > 300) || (error < -300))
+      {
+        motor(0);
+        Serial.println("Pendulum out of bounds");
+        break;
+      }
       
       // Get position and angle measurements, estimate velocities
       cartPos = (getMotorEncoder())*cart_conv_factor_m;
@@ -347,6 +352,7 @@ void balance(void)
       pendAngle = alpha*pendAngle + (1-alpha)*prevPendAngle;
       pendVel = (pendAngle - prevPendAngle)/Ts;
       
+	    // Print state values for data collection		
       Serial.print(cartPos, 4);
       Serial.print(", ");
       Serial.print(cartVel, 4);
@@ -355,19 +361,10 @@ void balance(void)
       Serial.print(", ");
       Serial.print(pendVel, 4);
 
-      // Quit if error too large (+/-45 degrees)
-      if ((pendAngle > 0.802851) || (pendAngle < -0.8020851))
-      {
-        motor(0);
-        Serial.println("Pendulum out of bounds");
-        break;
-      }
-
       // Calculate voltage cmd then PWM cmd
       voltageCmd = -(K_lqr[0]*(cartPos - cartPosRef) + K_lqr[1]*cartVel + K_lqr[2]*pendAngle + K_lqr[3]*pendVel);
-      pwmCmd = round(voltageCmd*(255/motorVMax));
+      pwmCmd = round(voltageCmd*(255.0/motorVMax));
       
-
       motError = getMotorEncoder();
       if ((motError > pd) && (prevMotError <= pd)) pt = ptSave - pa;
       else if ((motError < -pd) && (prevMotError >= pd)) pt = ptSave + pa;
@@ -375,12 +372,11 @@ void balance(void)
       else if ((motError > -(pd-1)) && (motError < (pd-1))) pt = ptSave;
       prevMotError = motError;
 
-      // Clip motor drive
-      if (pwmCmd > 255) pwmCmd = 255;
-      else if (pwmCmd < -255) pwmCmd = -255;
-      else if (pwmCmd <= 34 && pwmCmd > 15) pwmCmd = 37;
+      // Ignore motor deadband, may help reduce jitter
+      if (pwmCmd <= 34 && pwmCmd > 15) pwmCmd = 37;
       else if (pwmCmd >= -34 && pwmCmd < -15) pwmCmd = -37;
       motor(pwmCmd);
+	    // Print pwm cmd for data collection
       Serial.print(", ");
       Serial.println(pwmCmd);
     }
@@ -396,7 +392,7 @@ void balance(void)
   }
   motor(0);
   // Restore programmed Pendulum Top value
-  pt= ptSave;
+  pt = ptSave;
 }
 
 // Get a command from the serial port.  If the command is a parameter change, then
